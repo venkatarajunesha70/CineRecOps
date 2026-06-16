@@ -1,0 +1,28 @@
+# ── Training image ─────────────────────────────────────────────────────────────
+FROM tensorflow/tensorflow:2.15.0-gpu AS base
+
+WORKDIR /app
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Source code
+COPY src/ ./src/
+COPY configs/ ./configs/
+COPY setup.py .
+
+RUN pip install --no-cache-dir -e .
+
+# Create data directories
+RUN mkdir -p data/raw data/processed data/features mlruns artifacts
+
+ENV PYTHONPATH=/app/src
+ENV MLFLOW_TRACKING_URI=http://mlflow:5000
+
+CMD ["python", "src/training/train.py"]

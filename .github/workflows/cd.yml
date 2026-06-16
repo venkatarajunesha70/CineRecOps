@@ -1,0 +1,133 @@
+name: CD — Train, Register & Deploy
+
+on:
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      model_type:
+        description: "Model type (two_tower | ncf | hybrid)"
+        required: true
+        default: "two_tower"
+      promote:
+        description: "Auto-promote to Production after training"
+        type: boolean
+        default: true
+  # Scheduled nightly retraining
+  schedule:
+    - cron: "0 2 * * *"   # 02:00 UTC daily
+
+env:
+  PYTHON_VERSION: "3.10"
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MLFLOW_MODEL_NAME: cinerecops-recommender
+
+jobs:
+  # ── Train & Register ───────────────────────────────────────────────────────
+  train:
+    name: Train Model
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.train.outputs.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install tensorflow==2.15.0 mlflow==2.9.2 hydra-core==1.3.2
+          pip install pandas numpy scikit-learn pyarrow loguru tqdm
+
+      - name: Run training pipeline
+        id: train
+        env:
+          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'src')
+          from pipelines.full_pipeline import run_pipeline
+          run_id = run_pipeline(
+              model_type='${{ github.event.inputs.model_type || 'two_tower' }}',
+              promote=${{ github.event.inputs.promote == 'true' && 'True' || 'False' }},
+          )
+          print(f'::set-output name=run_id::{run_id}')
+          "
+
+      - name: Upload training artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts-${{ github.run_id }}
+          path: data/processed/
+          retention-days: 30
+
+  # ── Promote Best Model ────────────────────────────────────────────────────
+  promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: train
+    if: ${{ github.event.inputs.promote != 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install mlflow
+        run: pip install mlflow==2.9.2 loguru
+
+      - name: Promote best model
+        env:
+          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'mlflow')
+          from registry import promote_best_model
+          promote_best_model(
+              experiment_name='cinerecops',
+              model_name='${{ env.MLFLOW_MODEL_NAME }}',
+              metric='test_rmse',
+          )
+          "
+
+  # ── Deploy Serving API ────────────────────────────────────────────────────
+  deploy:
+    name: Deploy Serving API
+    runs-on: ubuntu-latest
+    needs: promote
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push serving image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.serve
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cinerecops-serve:latest
+            ghcr.io/${{ github.repository_owner }}/cinerecops-serve:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify deployment health
+        run: |
+          echo "Deployment complete. Image: ghcr.io/${{ github.repository_owner }}/cinerecops-serve:${{ github.sha }}"
+          echo "Run: docker pull ghcr.io/${{ github.repository_owner }}/cinerecops-serve:latest"

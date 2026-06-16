@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  # ── MLflow Tracking Server ──────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.9.2
+    container_name: cinerecops-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Inference API ─────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.serve
+    container_name: cinerecops-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_MODEL_NAME=cinerecops-recommender
+      - MODEL_STAGE=Production
+      - API_WORKERS=2
+    volumes:
+      - processed-data:/app/data/processed
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # ── Training job (run-once) ────────────────────────────────────────────────
+  trainer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.train
+    container_name: cinerecops-trainer
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - mlflow-data:/app/mlruns
+      - raw-data:/app/data/raw
+      - processed-data:/app/data/processed
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    profiles:
+      - training   # Only started with: docker compose --profile training up
+
+volumes:
+  mlflow-data:
+  raw-data:
+  processed-data:

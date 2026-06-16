@@ -1,0 +1,19 @@
+# @package _global_
+experiment:
+  name: cf_experiment
+  description: "Neural Collaborative Filtering with larger embeddings"
+  tags:
+    model_type: ncf
+    dataset: movielens_1m
+
+model:
+  type: ncf
+  user_embedding_dim: 128
+  item_embedding_dim: 128
+  hidden_layers: [512, 256, 128]
+  dropout_rate: 0.4
+
+training:
+  epochs: 100
+  batch_size: 512
+  learning_rate: 0.0005
